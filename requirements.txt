@@ -1,0 +1,5 @@
+python-telegram-bot==21.6
+APScheduler==3.10.4
+pytz
+python-dotenv
+psycopg2-binary
