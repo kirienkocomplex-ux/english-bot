@@ -4,6 +4,8 @@ import csv
 import random
 from datetime import datetime, timedelta, time
 import pytz
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # ---- Telegram & scheduling ----
 from telegram import Update, ForceReply, InputFile
@@ -52,12 +54,10 @@ HELP = (
 def pg_conn():
     return psycopg2.connect(DATABASE_URL, cursor_factory=psycopg2.extras.RealDictCursor)
 
-
 def sqlite_conn():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
-
 
 if IS_PG:
     def db_exec(query: str, params: tuple = ()):  # write
@@ -85,7 +85,6 @@ else:
     def db_fetchall(query: str, params: tuple = ()):  # many rows
         cur = _sqlite.execute(query, params)
         return cur.fetchall()
-
 
 def init_schema():
     if IS_PG:
@@ -159,7 +158,6 @@ def init_schema():
             """
         )
 
-
 def get_user(chat_id: int):
     row = db_fetchone((
         "SELECT * FROM users WHERE chat_id = %s" if IS_PG else "SELECT * FROM users WHERE chat_id = ?"
@@ -170,7 +168,6 @@ def get_user(chat_id: int):
         "INSERT INTO users(chat_id) VALUES(%s)" if IS_PG else "INSERT INTO users(chat_id) VALUES(?)"
     ), (chat_id,))
     return get_user(chat_id)
-
 
 def set_user(chat_id: int, **fields):
     if not fields:
@@ -185,7 +182,6 @@ def set_user(chat_id: int, **fields):
         f"UPDATE users SET {', '.join(cols)} WHERE chat_id = %s" if IS_PG else f"UPDATE users SET {', '.join(cols)} WHERE chat_id = ?"
     ), tuple(vals))
 
-
 def add_vocab(chat_id: int, text: str):
     text = (text or "").strip()
     if not text:
@@ -194,18 +190,17 @@ def add_vocab(chat_id: int, text: str):
         "INSERT INTO vocab(chat_id, text) VALUES(%s,%s)" if IS_PG else "INSERT INTO vocab(chat_id, text) VALUES(?,?)"
     ), (chat_id, text))
 
-
 def list_vocab(chat_id: int, limit: int = 50):
     return db_fetchall((
-        "SELECT id, text, last_seen, strength FROM vocab WHERE chat_id=%s AND active=1 ORDER BY id LIMIT %s" if IS_PG else "SELECT id, text, last_seen, strength FROM vocab WHERE chat_id=? AND active=1 ORDER BY id LIMIT ?"
+        "SELECT id, text, last_seen, strength FROM vocab WHERE chat_id=%s AND active=1 ORDER BY id LIMIT %s"
+        if IS_PG else
+        "SELECT id, text, last_seen, strength FROM vocab WHERE chat_id=? AND active=1 ORDER BY id LIMIT ?"
     ), (chat_id, limit))
-
 
 def remove_vocab(chat_id: int, vid: int):
     db_exec((
         "UPDATE vocab SET active=0 WHERE chat_id=%s AND id=%s" if IS_PG else "UPDATE vocab SET active=0 WHERE chat_id=? AND id=?"
     ), (chat_id, vid))
-
 
 def pick_vocab(chat_id: int):
     if IS_PG:
@@ -227,14 +222,17 @@ def pick_vocab(chat_id: int):
             (chat_id,)
         )
 
-
 def record_answer(chat_id: int, vocab_id: int, text: str):
     now = datetime.utcnow().isoformat()
     db_exec((
-        "INSERT INTO answers(chat_id, vocab_id, text, answered_at) VALUES(%s,%s,%s,%s)" if IS_PG else "INSERT INTO answers(chat_id, vocab_id, text, answered_at) VALUES(?,?,?,?)"
+        "INSERT INTO answers(chat_id, vocab_id, text, answered_at) VALUES(%s,%s,%s,%s)"
+        if IS_PG else
+        "INSERT INTO answers(chat_id, vocab_id, text, answered_at) VALUES(?,?,?,?)"
     ), (chat_id, vocab_id, text, now))
     db_exec((
-        "UPDATE vocab SET last_seen=%s, strength=strength+1 WHERE id=%s" if IS_PG else "UPDATE vocab SET last_seen=?, strength=strength+1 WHERE id=?"
+        "UPDATE vocab SET last_seen=%s, strength=strength+1 WHERE id=%s"
+        if IS_PG else
+        "UPDATE vocab SET last_seen=?, strength=strength+1 WHERE id=?"
     ), (now, vocab_id))
 
 # ===================== SCHEDULER =====================
@@ -261,7 +259,6 @@ async def schedule_today(app, chat_id: int):
     for t in sorted(planned):
         scheduler.add_job(send_prompt, trigger=DateTrigger(run_date=t), args=[app, chat_id])
 
-
 async def send_prompt(app, chat_id: int):
     v = pick_vocab(chat_id)
     if not v:
@@ -281,10 +278,8 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     await schedule_today(ctx.application, chat_id)
 
-
 async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(HELP)
-
 
 async def add_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     txt = " ".join(ctx.args).strip()
@@ -293,7 +288,6 @@ async def add_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     add_vocab(update.effective_chat.id, txt)
     await update.message.reply_text(f"Додано: {txt}")
-
 
 async def list_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     rows = list_vocab(update.effective_chat.id)
@@ -308,7 +302,6 @@ async def list_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             out.append(f"{r['id']}. {r['text']} (seen: {r['last_seen'] or '—'})")
     await update.message.reply_text("\n".join(out))
 
-
 async def remove_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args or not ctx.args[0].isdigit():
         await update.message.reply_text("Використання: /remove <id>  (див. /list)")
@@ -316,14 +309,13 @@ async def remove_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     remove_vocab(update.effective_chat.id, int(ctx.args[0]))
     await update.message.reply_text("Видалено")
 
-
 async def settings_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     u = get_user(chat_id)
     if len(ctx.args) >= 3:
         try:
             count = int(ctx.args[0]); start_h = int(ctx.args[1]); end_h = int(ctx.args[2])
-            tz_name = ctx.args[3] if len(ctx.args) >= 4 else (u.get("tz") if IS_PG else u["tz"]) 
+            tz_name = ctx.args[3] if len(ctx.args) >= 4 else (u.get("tz") if IS_PG else u["tz"])
             set_user(chat_id, daily_count=count, start_hour=start_h, end_hour=end_h, tz=tz_name)
             await update.message.reply_text(
                 f"Оновлено: {count} раз/день, {start_h}:00–{end_h}:00, tz: {tz_name}"
@@ -341,7 +333,6 @@ async def settings_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "Використання: /settings <кількість> <початок> <кінець> [timezone]\n" + cur_line
     )
 
-
 async def when_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     u = get_user(chat_id)
@@ -355,7 +346,6 @@ async def when_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     times.sort()
     await update.message.reply_text("Сьогодні: " + (", ".join(times) if times else "поки порожньо"))
 
-
 async def reply_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not update.message.reply_to_message:
         return
@@ -366,23 +356,41 @@ async def reply_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     record_answer(update.effective_chat.id, vid, update.message.text)
     await update.message.reply_text("Записано ✔️")
 
-
 async def export_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     rows = db_fetchall((
-        "SELECT answered_at, text FROM answers WHERE chat_id=%s ORDER BY answered_at DESC" if IS_PG else "SELECT answered_at, text FROM answers WHERE chat_id=? ORDER BY answered_at DESC"
+        "SELECT answered_at, text FROM answers WHERE chat_id=%s ORDER BY answered_at DESC"
+        if IS_PG else
+        "SELECT answered_at, text FROM answers WHERE chat_id=? ORDER BY answered_at DESC"
     ), (chat_id,))
     if not rows:
         await update.message.reply_text("Немає відповідей 💾")
         return
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["answered_at_UTC", "answer"]) 
+    writer.writerow(["answered_at_UTC", "answer"])
     for r in rows:
         writer.writerow([r["answered_at"] if IS_PG else r["answered_at"], r["text"] if IS_PG else r["text"]])
     output.seek(0)
     await update.message.reply_document(InputFile(io.BytesIO(output.getvalue().encode("utf-8")), filename="answers.csv"))
 
+# ===================== tiny HTTP server for Render =====================
+
+class _Health(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path in ("/", "/healthz"):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(b"ok")
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+def _run_http():
+    # Render передає порт у змінній середовища PORT
+    port = int(os.environ.get("PORT", "10000"))
+    HTTPServer(("0.0.0.0", port), _Health).serve_forever()
 
 # ===================== MAIN =====================
 
@@ -406,10 +414,12 @@ def main():
     app.add_handler(CommandHandler("export", export_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, reply_handler))
 
+    # ——— запуск легкого вебсерверу, щоб Render бачив відкритий порт
+    threading.Thread(target=_run_http, daemon=True).start()
+
     scheduler.start()
     print("Bot started. Press Ctrl+C to stop.")
     app.run_polling()
-
 
 if __name__ == "__main__":
     main()
